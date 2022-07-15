@@ -1,14 +1,10 @@
 //go:build linux
 // +build linux
 
-// This program demonstrates attaching an eBPF program to a network interface
-// with XDP (eXpress Data Path). The program parses the IPv4 source address
-// from packets and writes the packet count by IP to an LRU hash map.
-// The userspace program (Go code in this file) prints the contents
-// of the map to stdout every second.
-// It is possible to modify the XDP program to drop or redirect packets
-// as well -- give it a try!
-// This example depends on bpf_link, available in Linux kernel version 5.7 or newer.
+// This program demonstrates attaching an eBPF program to a kernel symbol.
+// The eBPF program will be attached to the start of the sys_execve
+// kernel function and prints out the number of times it has been called
+// every second.
 package main
 
 import (
@@ -16,17 +12,33 @@ import (
 	"log"
 	"net"
 	"os"
+	"path"
 	"strings"
 	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/rlimit"
 )
 
 // $BPF_CLANG and $BPF_CFLAGS are set by the Makefile.
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS bpf xdp.c -- -I../headers
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc $BPF_CLANG -cflags $BPF_CFLAGS bpf lpm_pin.c -- -I../headers
+
+const (
+	bpfFSPath = "/sys/fs/bpf"
+)
 
 func main() {
+	// Allow the current process to lock memory for eBPF resources.
+	if err := rlimit.RemoveMemlock(); err != nil {
+		log.Fatal(err)
+	}
+
+	pinPath := path.Join(bpfFSPath, "xdp_lpm_stats_map")
+	if err := os.MkdirAll(pinPath, os.ModePerm); err != nil {
+		log.Fatalf("failed to create bpf fs subpath: %+v", err)
+	}
+
 	if len(os.Args) < 2 {
 		log.Fatalf("Please specify a network interface")
 	}
@@ -38,10 +50,17 @@ func main() {
 		log.Fatalf("lookup network iface %q: %s", ifaceName, err)
 	}
 
-	// Load pre-compiled programs into the kernel.
-	objs := bpfObjects{}
-	if err := loadBpfObjects(&objs, nil); err != nil {
-		log.Fatalf("loading objects: %s", err)
+	var objs bpfObjects
+	if err := loadBpfObjects(&objs, &ebpf.CollectionOptions{
+		Maps: ebpf.MapOptions{
+			// Pin the map to the BPF filesystem and configure the
+			// library to automatically re-write it in the BPF
+			// program so it can be re-used if it already exists or
+			// create it if not
+			PinPath: pinPath,
+		},
+	}); err != nil {
+		log.Fatalf("loading objects: %v", err)
 	}
 	defer objs.Close()
 
@@ -62,7 +81,7 @@ func main() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
-		s, err := formatMapContents(objs.XdpStatsMap)
+		s, err := formatMapContents(objs.XdpLpmStatsMap)
 		if err != nil {
 			log.Printf("Error reading map: %s", err)
 			continue
