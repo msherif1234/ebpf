@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/btf"
 	"github.com/cilium/ebpf/link"
 )
 
@@ -41,7 +42,7 @@ func main() {
 		log.Fatalf("loading objects: %s", err)
 	}
 	defer objs.Close()
-
+	btf.FlushKernelSpec()
 	// Attach the program.
 	l, err := link.AttachXDP(link.XDPOptions{
 		Program:   objs.XdpProgFunc,
