@@ -1974,6 +1974,75 @@ func BenchmarkMap(b *testing.B) {
 	})
 }
 
+func BenchmarkHashDelete(b *testing.B) {
+	m, err := NewMap(&MapSpec{
+		Type:       Hash,
+		KeySize:    8,
+		ValueSize:  8,
+		MaxEntries: 10000,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() {
+		m.Close()
+	})
+
+	var (
+		n      = m.MaxEntries()
+		keys   = make([]uint64, n)
+		values = make([]uint64, n)
+	)
+
+	for i := 0; uint32(i) < n; i++ {
+		keys[i] = uint64(i)
+		values[i] = uint64(i)
+	}
+
+	b.Run("MapIteratorDelete", func(b *testing.B) {
+		var k, v uint64
+
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			b.StopTimer()
+			if _, err := m.BatchUpdate(keys, values, nil); err != nil {
+				b.Fatal(err)
+			}
+			b.StartTimer()
+			iter := m.Iterate()
+			for iter.Next(&k, &v) {
+				if err := m.Delete(unsafe.Pointer(&k)); err != nil {
+					b.Fatal("Can't delete:", err)
+				}
+			}
+			if err := iter.Err(); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("MapBatchLookupAndDelete", func(b *testing.B) {
+		k := make([]uint64, m.MaxEntries())
+		v := make([]uint64, m.MaxEntries())
+
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			b.StopTimer()
+			if _, err := m.BatchUpdate(keys, values, nil); err != nil {
+				b.Fatal(err)
+			}
+			b.StartTimer()
+			iter := m.Iterate()
+			var next, val uint32
+			iter.Next(&next, &val)
+			_, err := m.BatchLookupAndDelete(nil, &next, k, v, nil)
+			if !errors.Is(err, ErrKeyNotExist) {
+				b.Fatalf("BatchLookupAndDelete: %v", err)
+			}
+		}
+	})
+}
+
 // Per CPU maps store a distinct value for each CPU. They are useful
 // to collect metrics.
 func ExampleMap_perCPU() {
